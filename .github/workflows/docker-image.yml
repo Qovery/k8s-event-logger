@@ -6,8 +6,7 @@
 # GitHub recommends pinning actions to a commit SHA.
 # To get a newer version, you will need to update the SHA.
 # You can also reference a tag or branch, but the action may change without warning.
-
-name: create and publish Docker image
+name: Build and Publish Multi-Arch Docker Image
 
 on:
   push:
@@ -25,19 +24,22 @@ jobs:
       packages: write
 
     steps:
-      - name: checkout repository
+      - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: log in to the Container registry
-        uses: docker/login-action@f054a8b539a109f9f41c372932f1ae047eff08c9
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: extract metadata (tags, labels) for Docker
+      - name: Extract metadata (tags, labels) for Docker
         id: meta
-        uses: docker/metadata-action@98669ae865ea3cffbcbaa878cf57c20bbf1c6c38
+        uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -47,10 +49,12 @@ jobs:
             type=ref,event=pr
             type=raw,value={{branch}}
             type=raw,value={{sha}}
-      - name: build and push Docker image
-        uses: docker/build-push-action@ad44023a93711e3deb337508980b4b5e9bcdc5dc
+
+      - name: Build and push Docker image (multi-arch)
+        uses: docker/build-push-action@v5
         with:
           context: .
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
