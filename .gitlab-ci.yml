@@ -34,3 +34,4 @@ build-image:
     - vm-250mcpu-1gmem-0g
   only:
     - master
+    - feat/update-event
