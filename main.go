@@ -168,8 +168,14 @@ func labelOf(obj runtime.Object, key string) string {
 }
 
 func guessGVR(evt *corev1.Event) schema.GroupVersionResource {
-	gvk := schema.FromAPIVersionAndKind(evt.InvolvedObject.APIVersion, evt.InvolvedObject.Kind)
+	gvk := schema.FromAPIVersionAndKind(evt.InvolvedObject.APIVersion,
+		evt.InvolvedObject.Kind)
+
 	gvr, _ := meta.UnsafeGuessKindToResource(gvk)
+
+	if gvr.Group == "" && gvr.Version == "" {
+		gvr.Version = "v1"
+	}
 	return gvr
 }
 
