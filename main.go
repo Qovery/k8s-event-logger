@@ -2,9 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 	"log"
 	"net/http"
+	"os"
 	"reflect"
 	"sync"
 	"time"
@@ -239,4 +244,93 @@ func labelOf(obj runtime.Object, key string) string {
 		return ""
 	}
 	return acc.GetLabels()[key]
+}
+
+func main() {
+	flag.Parse()
+
+	loggerApplication := log.New(os.Stderr, "", log.LstdFlags)
+	loggerEvent := log.New(os.Stdout, "", 0)
+
+	// Using First sample from https://pkg.go.dev/k8s.io/client-go/tools/clientcmd to automatically deal with environment variables and default file paths
+
+	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	// if you want to change the loading rules (which files in which order), you can do so here
+
+	configOverrides := &clientcmd.ConfigOverrides{}
+	// if you want to change override values or bind them to flags, there are methods to help you
+
+	kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
+
+	config, err := kubeConfig.ClientConfig()
+	if err != nil {
+		loggerApplication.Panicln(err.Error())
+	}
+
+	// Note that this *should* automatically sanitize sensitive fields
+	loggerApplication.Println("Using configuration:", config.String())
+
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		loggerApplication.Panicln(err.Error())
+	}
+
+	initMetrics()
+
+	restCfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		clientcmd.NewDefaultClientConfigLoadingRules(),
+		&clientcmd.ConfigOverrides{},
+	).ClientConfig()
+	if err != nil {
+		loggerApplication.Fatalf("kubeconfig: %v", err)
+	}
+
+	dynClient, err := dynamic.NewForConfig(restCfg)
+	if err != nil {
+		loggerApplication.Fatalf("dynamic client: %v", err)
+	}
+
+	enr := newEnricher(dynClient, *resyncPeriod)
+	defer enr.Close()
+
+	watchlist := cache.NewListWatchFromClient(
+		clientset.CoreV1().RESTClient(),
+		"events",
+		corev1.NamespaceAll,
+		fields.Everything(),
+	)
+	_, controller := cache.NewInformer(
+		watchlist,
+		&corev1.Event{},
+		0,
+		cache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				if *ignoreNormal && obj.(*corev1.Event).Type == corev1.EventTypeNormal {
+					return
+				}
+				onEvent(obj.(*corev1.Event), loggerEvent, enr, loggerApplication)
+			},
+			UpdateFunc: func(oldObj, newObj interface{}) {
+				if *ignoreUpdate || (*ignoreNormal && newObj.(*corev1.Event).Type == corev1.EventTypeNormal) {
+					return
+				}
+				onEvent(newObj.(*corev1.Event), loggerEvent, enr, loggerApplication)
+			},
+		},
+	)
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go controller.Run(stop)
+	select {}
+}
+
+func onEvent(evt *corev1.Event, logger *log.Logger, enr *Enricher, appLogger *log.Logger) {
+	j, _ := json.Marshal(evt)
+	logger.Printf("%s\n", string(j))
+
+	if *metricsEnabled {
+		pid, eid, sid := enr.Labels(evt, appLogger)
+		incMetrics(evt, pid, eid, sid)
+	}
 }
