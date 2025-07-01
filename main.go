@@ -1,4 +1,3 @@
-// main.go
 package main
 
 import (
@@ -9,216 +8,162 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
 	dynamicinformers "k8s.io/client-go/dynamic/dynamicinformer"
-	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
 var (
-	ignoreNormal   = flag.Bool("ignore-normal", false, "ignore events of type 'Normal' to reduce noise")
+	ignoreNormal   = flag.Bool("ignore-normal", false, "ignore events of type 'Normal'")
 	ignoreUpdate   = flag.Bool("ignore-update", true, "ignore Update events")
-	metricsEnabled = flag.Bool("metrics-enabled", false, "enable metrics")
-	resyncPeriod   = flag.Duration("resync-period", 0, "resync period for informers (0 disables)")
+	metricsEnabled = flag.Bool("metrics-enabled", false, "enable /metrics endpoint")
+	resyncPeriod   = flag.Duration("resync-period", 0, "informer resync period (0 disables)")
 )
-
-/* -------------------------------------------------------------------------- */
-/*                                Prom metrics                                */
-/* -------------------------------------------------------------------------- */
 
 var (
-	eventsTotal = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "k8s_event_logger_q_k8s_events_total",
-			Help: "Total number of Kubernetes events processed",
-		},
-		[]string{"type", "reason", "object_kind", "qovery.com/project-id", "qovery.com/environment-id", "qovery_com_service_id"},
-	)
-	//eventsWithoutService = promauto.NewCounterVec(
-	//	prometheus.CounterOpts{
-	//		Name: "k8s_event_logger_debug_total",
-	//		Help: "Total number of Kubernetes events processed",
-	//	},
-	//	[]string{"type", "reason", "object_kind", "object_name", "namespace"},
-	//)
+	eventsTotal *prometheus.CounterVec
 )
 
-/* -------------------------- Dynamic-informer cache ------------------------ */
-
-type dynCache struct {
-	lister cache.GenericLister
-	stop   chan struct{}
-}
-
-var (
-	dynClient dynamic.Interface
-	dynMap    = map[string]*dynCache{} // key = GVR.String()
-)
-
-/* -------------------------------------------------------------------------- */
-
-func main() {
-	flag.Parse()
-
-	logApp := log.New(os.Stderr, "", log.LstdFlags) // appli
-	logEvt := log.New(os.Stdout, "", 0)             // events
-
-	/* ----------------------- /metrics HTTP server ------------------------- */
-	go func() {
-		if *metricsEnabled {
-			metricsPort := "8080"
-			http.Handle("/metrics", promhttp.Handler())
-			http.ListenAndServe(":"+metricsPort, nil)
-		}
-	}()
-
-	/* ---------------------- Build kube clients ---------------------------- */
-	cfgLoadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-	cfgOverrides := &clientcmd.ConfigOverrides{}
-	restCfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-		cfgLoadingRules, cfgOverrides).ClientConfig()
-	if err != nil {
-		logApp.Fatalf("kubeconfig: %v", err)
-	}
-
-	clientset, err := kubernetes.NewForConfig(restCfg)
-	if err != nil {
-		logApp.Fatalf("typed client: %v", err)
-	}
-	dynClient, err = dynamic.NewForConfig(restCfg)
-	if err != nil {
-		logApp.Fatalf("dynamic client: %v", err)
-	}
-
-	/* -------------------- SharedInformerFactory (typed) ------------------- */
-	factory := informers.NewSharedInformerFactory(clientset, *resyncPeriod)
-
-	stopCh := make(chan struct{})
-	defer close(stopCh)
-	factory.Start(stopCh)
-	factory.WaitForCacheSync(stopCh)
-
-	/* ---------------------- Watch Kubernetes events ----------------------- */
-	watchlist := cache.NewListWatchFromClient(
-		clientset.CoreV1().RESTClient(),
-		"events",
-		corev1.NamespaceAll,
-		metav1.Everything(),
-	)
-	_, ctrl := cache.NewInformer(
-		watchlist,
-		&corev1.Event{},
-		0,
-		cache.ResourceEventHandlerFuncs{
-			AddFunc: func(obj interface{}) {
-				evt := obj.(*corev1.Event)
-				if *ignoreNormal && evt.Type == corev1.EventTypeNormal {
-					return
-				}
-				handleEvent(evt, logEvt)
-			},
-			UpdateFunc: func(oldObj, newObj interface{}) {
-				if *ignoreUpdate {
-					return
-				}
-				evt := newObj.(*corev1.Event)
-				if *ignoreNormal && evt.Type == corev1.EventTypeNormal {
-					return
-				}
-				handleEvent(evt, logEvt)
-			},
-		},
-	)
-	go ctrl.Run(stopCh)
-	<-stopCh
-}
-
-/* -------------------------------------------------------------------------- */
-func fetchObject(evt *corev1.Event) (runtime.Object, bool) {
-	ns := evt.Namespace
-	if ns == "" {
-		ns = "default"
-	}
-
-	gvr := guessGVR(evt) // works for built-ins and CRDs
-	dynCache := getDynLister(gvr)
-	obj, err := dynCache.lister.
-		ByNamespace(ns).
-		Get(evt.InvolvedObject.Name)
-	return obj, err == nil
-}
-
-func handleEvent(evt *corev1.Event, logger *log.Logger) {
-	// 1) raw JSON to stdout (unchanged)
-	raw, _ := json.Marshal(evt)
-	logger.Println(string(raw))
-
-	if *metricsEnabled == false {
+func initMetrics() {
+	if !*metricsEnabled {
 		return
 	}
+	eventsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "k8s_event_logger_events_total",
+			Help: "Total Kubernetes events processed, enriched with Qovery labels",
+		},
+		[]string{"type", "reason", "kind",
+			"qovery_project_id", "qovery_environment_id", "qovery_service_id"},
+	)
+	prometheus.MustRegister(eventsTotal)
 
-	// 2) try to resolve the referenced object ONCE
-	obj, _ := fetchObject(evt)
-	projectId := labelOf(obj, "qovery.com/project-id", evt.InvolvedObject.Kind)
-	envId := labelOf(obj, "qovery.com/environment-id", evt.InvolvedObject.Kind)
-	serviceId := labelOf(obj, "qovery.com/service-id", evt.InvolvedObject.Kind)
-
-	// 3) main counter
-	ns := evt.Namespace
-	if ns == "" {
-		ns = "default"
-	}
-	eventsTotal.WithLabelValues(
-		evt.Type,
-		evt.Reason,
-		evt.InvolvedObject.Kind,
-		projectId,
-		envId,
-		serviceId,
-	).Inc()
-
-	//if serviceId == "" {
-	//eventsWithoutService.WithLabelValues(
-	//	evt.Type,
-	//	evt.Reason,
-	//	evt.InvolvedObject.Kind,
-	//	evt.InvolvedObject.Name,
-	//	evt.InvolvedObject.Namespace,
-	//)
-	//}
+	go func() {
+		log.Printf("[metrics] exposing /metrics on :8080")
+		_ = http.ListenAndServe(":8080", promhttp.Handler())
+	}()
 }
 
-/* --------------------------- helper functions ----------------------------- */
+func incMetrics(evt *corev1.Event, projectID, envID, serviceID string) {
+	if eventsTotal == nil {
+		return
+	}
+	eventsTotal.WithLabelValues(
+		evt.Type, evt.Reason, evt.InvolvedObject.Kind,
+		projectID, envID, serviceID,
+	).Inc()
+}
 
-func labelOf(obj runtime.Object, key string, kind string) string {
+type Enricher struct {
+	dynClient    dynamic.Interface
+	resyncPeriod time.Duration
+
+	mu     sync.RWMutex
+	lister map[string]cache.GenericLister
+	stopCh map[string]chan struct{}
+}
+
+func newEnricher(dyn dynamic.Interface, resync time.Duration) *Enricher {
+	return &Enricher{
+		dynClient:    dyn,
+		resyncPeriod: resync,
+		lister:       map[string]cache.GenericLister{},
+		stopCh:       map[string]chan struct{}{},
+	}
+}
+
+func (e *Enricher) Close() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, ch := range e.stopCh {
+		close(ch)
+	}
+}
+
+func (e *Enricher) Labels(evt *corev1.Event) (string, string, string) {
+	obj := e.fetch(evt)
+	return labelOf(obj, "qovery.com/project-id"),
+		labelOf(obj, "qovery.com/environment-id"),
+		labelOf(obj, "qovery.com/service-id")
+}
+
+func (e *Enricher) fetch(evt *corev1.Event) runtime.Object {
+	l := e.getLister(guessGVR(evt))
+	if l == nil {
+		return nil
+	}
+
+	if obj, err := l.Get(evt.InvolvedObject.Name); err == nil {
+		return obj
+	}
+
+	if evt.Namespace != "" {
+		if obj, err := l.ByNamespace(evt.Namespace).
+			Get(evt.InvolvedObject.Name); err == nil {
+			return obj
+		}
+	}
+	return nil
+}
+
+func (e *Enricher) getLister(gvr schema.GroupVersionResource) cache.GenericLister {
+	key := gvr.String()
+
+	e.mu.RLock()
+	l, ok := e.lister[key]
+	e.mu.RUnlock()
+	if ok {
+		return l
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if l, ok = e.lister[key]; ok {
+		return l
+	}
+
+	f := dynamicinformers.NewDynamicSharedInformerFactory(e.dynClient, e.resyncPeriod)
+	inf := f.ForResource(gvr)
+
+	stop := make(chan struct{})
+	f.Start(stop)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if !cache.WaitForCacheSync(ctx.Done(), inf.Informer().HasSynced) {
+		close(stop)
+		return nil
+	}
+
+	e.lister[key] = inf.Lister()
+	e.stopCh[key] = stop
+	return inf.Lister()
+}
+
+func labelOf(obj runtime.Object, key string) string {
 	if obj == nil {
 		return ""
 	}
-	// handle "typed nil"
 	v := reflect.ValueOf(obj)
 	if v.Kind() == reflect.Pointer && v.IsNil() {
 		return ""
 	}
-
 	acc, err := meta.Accessor(obj)
 	if err != nil || acc == nil {
 		return ""
 	}
-
 	return acc.GetLabels()[key]
 }
 
@@ -228,27 +173,91 @@ func guessGVR(evt *corev1.Event) schema.GroupVersionResource {
 	return gvr
 }
 
-func getDynLister(gvr schema.GroupVersionResource) *dynCache {
-	key := gvr.String()
-	if c, ok := dynMap[key]; ok {
-		return c
+func main() {
+	flag.Parse()
+
+	loggerApplication := log.New(os.Stderr, "", log.LstdFlags)
+	loggerEvent := log.New(os.Stdout, "", 0)
+
+	// Using First sample from https://pkg.go.dev/k8s.io/client-go/tools/clientcmd to automatically deal with environment variables and default file paths
+
+	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	// if you want to change the loading rules (which files in which order), you can do so here
+
+	configOverrides := &clientcmd.ConfigOverrides{}
+	// if you want to change override values or bind them to flags, there are methods to help you
+
+	kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
+
+	config, err := kubeConfig.ClientConfig()
+	if err != nil {
+		loggerApplication.Panicln(err.Error())
 	}
 
-	f := dynamicinformers.NewDynamicSharedInformerFactory(dynClient, *resyncPeriod)
-	inf := f.ForResource(gvr)
+	// Note that this *should* automatically sanitize sensitive fields
+	loggerApplication.Println("Using configuration:", config.String())
+
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		loggerApplication.Panicln(err.Error())
+	}
+
+	initMetrics()
+
+	restCfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		clientcmd.NewDefaultClientConfigLoadingRules(),
+		&clientcmd.ConfigOverrides{},
+	).ClientConfig()
+	if err != nil {
+		loggerApplication.Fatalf("kubeconfig: %v", err)
+	}
+
+	dynClient, err := dynamic.NewForConfig(restCfg)
+	if err != nil {
+		loggerApplication.Fatalf("dynamic client: %v", err)
+	}
+
+	enr := newEnricher(dynClient, *resyncPeriod)
+	defer enr.Close()
+
+	watchlist := cache.NewListWatchFromClient(
+		clientset.CoreV1().RESTClient(),
+		"events",
+		corev1.NamespaceAll,
+		fields.Everything(),
+	)
+	_, controller := cache.NewInformer(
+		watchlist,
+		&corev1.Event{},
+		0,
+		cache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				if *ignoreNormal && obj.(*corev1.Event).Type == corev1.EventTypeNormal {
+					return
+				}
+				onEvent(obj.(*corev1.Event), loggerEvent, enr)
+			},
+			UpdateFunc: func(oldObj, newObj interface{}) {
+				if *ignoreUpdate || (*ignoreNormal && newObj.(*corev1.Event).Type == corev1.EventTypeNormal) {
+					return
+				}
+				onEvent(newObj.(*corev1.Event), loggerEvent, enr)
+			},
+		},
+	)
 
 	stop := make(chan struct{})
-	f.Start(stop)
+	defer close(stop)
+	go controller.Run(stop)
+	select {}
+}
 
-	// wait cache sync (non-blocking backoff)
-	go func() {
-		wait.PollUntilContextTimeout(context.Background(), 200*time.Millisecond, 10*time.Second, true,
-			func(ctx context.Context) (bool, error) {
-				return cache.WaitForCacheSync(ctx.Done(), inf.Informer().HasSynced), nil
-			})
-	}()
+func onEvent(evt *corev1.Event, logger *log.Logger, enr *Enricher) {
+	j, _ := json.Marshal(evt)
+	logger.Printf("%s\n", string(j))
 
-	c := &dynCache{lister: inf.Lister(), stop: stop}
-	dynMap[key] = c
-	return c
+	if *metricsEnabled {
+		pid, eid, sid := enr.Labels(evt)
+		incMetrics(evt, pid, eid, sid)
+	}
 }
