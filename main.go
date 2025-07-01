@@ -2,11 +2,9 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"log"
 	"net/http"
-	"os"
 	"reflect"
 	"sync"
 	"time"
@@ -16,14 +14,11 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	dynamicinformers "k8s.io/client-go/dynamic/dynamicinformer"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/tools/clientcmd"
 )
 
 var (
@@ -101,53 +96,94 @@ func (e *Enricher) Labels(evt *corev1.Event, appLogger *log.Logger) (string, str
 }
 
 func (e *Enricher) fetch(evt *corev1.Event, appLogger *log.Logger) runtime.Object {
-	printLog := false
-	if evt.InvolvedObject.Kind == "Pod" {
-		printLog = true
-
-	}
+	gvr := guessGVR(evt)
+	printLog := evt.InvolvedObject.Kind == "Pod"
 
 	if printLog {
-		appLogger.Printf("fetching %s/%s/%s", evt.Namespace, evt.InvolvedObject.Kind, evt.InvolvedObject.Name)
+		appLogger.Printf("=== FETCH DEBUG ===")
+		appLogger.Printf("Event: %s/%s/%s", evt.Namespace, evt.InvolvedObject.Kind, evt.InvolvedObject.Name)
+		appLogger.Printf("APIVersion: %s, Kind: %s", evt.InvolvedObject.APIVersion, evt.InvolvedObject.Kind)
+		appLogger.Printf("Computed GVR: %s", gvr.String())
 	}
 
-	l := e.getLister(guessGVR(evt))
-	if printLog {
-		appLogger.Printf("l is nil %t", l == nil)
-	}
+	l := e.getLister(gvr)
 	if l == nil {
+		if printLog {
+			appLogger.Printf("ERROR: getLister returned nil for GVR: %s", gvr.String())
+		}
 		return nil
 	}
 
+	if printLog {
+		appLogger.Printf("Lister obtained successfully")
+	}
+
+	// Première tentative : ressource cluster-scoped
 	if obj, err := l.Get(evt.InvolvedObject.Name); err == nil {
 		if printLog {
-			appLogger.Printf("l.Get found")
+			appLogger.Printf("SUCCESS: Found via cluster-scoped lister")
 		}
 		return obj
 	} else {
-		appLogger.Printf("l.Get not found %s", err)
+		if printLog {
+			appLogger.Printf("Cluster-scoped lookup failed: %v", err)
+		}
 	}
 
+	// Deuxième tentative : ressource namespacée
 	if evt.Namespace != "" {
-		if obj, err := l.ByNamespace(evt.Namespace).
-			Get(evt.InvolvedObject.Name); err == nil {
-			if printLog {
-				appLogger.Printf("l.ByNamespace  found")
-			}
+		namespacedLister := l.ByNamespace(evt.Namespace)
+		if printLog {
+			appLogger.Printf("Trying namespaced lookup in namespace: %s", evt.Namespace)
+		}
 
+		if obj, err := namespacedLister.Get(evt.InvolvedObject.Name); err == nil {
+			if printLog {
+				appLogger.Printf("SUCCESS: Found via namespaced lister")
+			}
 			return obj
 		} else {
-			appLogger.Printf("l.ByNamespace not found %s", err)
+			if printLog {
+				appLogger.Printf("Namespaced lookup failed: %v", err)
+			}
+		}
+	} else {
+		if printLog {
+			appLogger.Printf("No namespace available for namespaced lookup")
 		}
 	}
 
 	if printLog {
-		appLogger.Printf("nil")
+		appLogger.Printf("FAILURE: Object not found in cache")
+		appLogger.Printf("=== END FETCH DEBUG ===")
 	}
-
 	return nil
 }
 
+// Version améliorée de guessGVR avec plus de debug
+func guessGVR(evt *corev1.Event) schema.GroupVersionResource {
+	gvk := schema.FromAPIVersionAndKind(evt.InvolvedObject.APIVersion, evt.InvolvedObject.Kind)
+
+	gvr, _ := meta.UnsafeGuessKindToResource(gvk)
+
+	// Correction pour les ressources core/v1
+	if gvr.Group == "" && gvr.Version == "" {
+		gvr.Version = "v1"
+	}
+
+	// Pour Pod spécifiquement, on s'assure d'avoir le bon GVR
+	if evt.InvolvedObject.Kind == "Pod" && gvr.Resource == "" {
+		gvr = schema.GroupVersionResource{
+			Group:    "",
+			Version:  "v1",
+			Resource: "pods",
+		}
+	}
+
+	return gvr
+}
+
+// Version améliorée de getLister avec debug
 func (e *Enricher) getLister(gvr schema.GroupVersionResource) cache.GenericLister {
 	key := gvr.String()
 
@@ -160,22 +196,31 @@ func (e *Enricher) getLister(gvr schema.GroupVersionResource) cache.GenericListe
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	// Double-check après avoir pris le lock
 	if l, ok = e.lister[key]; ok {
 		return l
 	}
+
+	log.Printf("Creating new informer for GVR: %s", gvr.String())
 
 	f := dynamicinformers.NewDynamicSharedInformerFactory(e.dynClient, e.resyncPeriod)
 	inf := f.ForResource(gvr)
 
 	stop := make(chan struct{})
 	f.Start(stop)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+
+	log.Printf("Waiting for cache sync for GVR: %s", gvr.String())
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // Augmenté à 30s
 	defer cancel()
+
 	if !cache.WaitForCacheSync(ctx.Done(), inf.Informer().HasSynced) {
+		log.Printf("Cache sync failed for GVR: %s", gvr.String())
 		close(stop)
 		return nil
 	}
 
+	log.Printf("Cache sync successful for GVR: %s", gvr.String())
 	e.lister[key] = inf.Lister()
 	e.stopCh[key] = stop
 	return inf.Lister()
@@ -194,105 +239,4 @@ func labelOf(obj runtime.Object, key string) string {
 		return ""
 	}
 	return acc.GetLabels()[key]
-}
-
-func guessGVR(evt *corev1.Event) schema.GroupVersionResource {
-	gvk := schema.FromAPIVersionAndKind(evt.InvolvedObject.APIVersion,
-		evt.InvolvedObject.Kind)
-
-	gvr, _ := meta.UnsafeGuessKindToResource(gvk)
-
-	if gvr.Group == "" && gvr.Version == "" {
-		gvr.Version = "v1"
-	}
-	return gvr
-}
-
-func main() {
-	flag.Parse()
-
-	loggerApplication := log.New(os.Stderr, "", log.LstdFlags)
-	loggerEvent := log.New(os.Stdout, "", 0)
-
-	// Using First sample from https://pkg.go.dev/k8s.io/client-go/tools/clientcmd to automatically deal with environment variables and default file paths
-
-	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-	// if you want to change the loading rules (which files in which order), you can do so here
-
-	configOverrides := &clientcmd.ConfigOverrides{}
-	// if you want to change override values or bind them to flags, there are methods to help you
-
-	kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
-
-	config, err := kubeConfig.ClientConfig()
-	if err != nil {
-		loggerApplication.Panicln(err.Error())
-	}
-
-	// Note that this *should* automatically sanitize sensitive fields
-	loggerApplication.Println("Using configuration:", config.String())
-
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		loggerApplication.Panicln(err.Error())
-	}
-
-	initMetrics()
-
-	restCfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-		clientcmd.NewDefaultClientConfigLoadingRules(),
-		&clientcmd.ConfigOverrides{},
-	).ClientConfig()
-	if err != nil {
-		loggerApplication.Fatalf("kubeconfig: %v", err)
-	}
-
-	dynClient, err := dynamic.NewForConfig(restCfg)
-	if err != nil {
-		loggerApplication.Fatalf("dynamic client: %v", err)
-	}
-
-	enr := newEnricher(dynClient, *resyncPeriod)
-	defer enr.Close()
-
-	watchlist := cache.NewListWatchFromClient(
-		clientset.CoreV1().RESTClient(),
-		"events",
-		corev1.NamespaceAll,
-		fields.Everything(),
-	)
-	_, controller := cache.NewInformer(
-		watchlist,
-		&corev1.Event{},
-		0,
-		cache.ResourceEventHandlerFuncs{
-			AddFunc: func(obj interface{}) {
-				if *ignoreNormal && obj.(*corev1.Event).Type == corev1.EventTypeNormal {
-					return
-				}
-				onEvent(obj.(*corev1.Event), loggerEvent, enr, loggerApplication)
-			},
-			UpdateFunc: func(oldObj, newObj interface{}) {
-				if *ignoreUpdate || (*ignoreNormal && newObj.(*corev1.Event).Type == corev1.EventTypeNormal) {
-					return
-				}
-				onEvent(newObj.(*corev1.Event), loggerEvent, enr, loggerApplication)
-			},
-		},
-	)
-
-	stop := make(chan struct{})
-	defer close(stop)
-	go controller.Run(stop)
-	select {}
-}
-
-func onEvent(evt *corev1.Event, logger *log.Logger, enr *Enricher, appLogger *log.Logger) {
-	j, _ := json.Marshal(evt)
-	logger.Printf("%s\n", string(j))
-
-	if *metricsEnabled {
-		pid, eid, sid := enr.Labels(evt, appLogger)
-		incMetrics(evt, pid, eid, sid)
-	}
 }
