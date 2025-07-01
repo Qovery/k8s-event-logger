@@ -93,29 +93,54 @@ func (e *Enricher) Close() {
 	}
 }
 
-func (e *Enricher) Labels(evt *corev1.Event) (string, string, string) {
-	obj := e.fetch(evt)
+func (e *Enricher) Labels(evt *corev1.Event, appLogger *log.Logger) (string, string, string) {
+	obj := e.fetch(evt, appLogger)
 	return labelOf(obj, "qovery.com/project-id"),
 		labelOf(obj, "qovery.com/environment-id"),
 		labelOf(obj, "qovery.com/service-id")
 }
 
-func (e *Enricher) fetch(evt *corev1.Event) runtime.Object {
+func (e *Enricher) fetch(evt *corev1.Event, appLogger *log.Logger) runtime.Object {
+	printLog := false
+	if evt.InvolvedObject.Kind == "Pod" {
+		printLog = true
+
+	}
+
+	if printLog {
+		appLogger.Printf("fetching %s/%s/%s", evt.Namespace, evt.InvolvedObject.Kind, evt.InvolvedObject.Name)
+	}
+
 	l := e.getLister(guessGVR(evt))
+	if printLog {
+		appLogger.Printf("l is nil %s", l == nil)
+	}
 	if l == nil {
 		return nil
 	}
 
 	if obj, err := l.Get(evt.InvolvedObject.Name); err == nil {
+		if printLog {
+			appLogger.Printf("l.Get not found")
+		}
 		return obj
 	}
 
 	if evt.Namespace != "" {
 		if obj, err := l.ByNamespace(evt.Namespace).
 			Get(evt.InvolvedObject.Name); err == nil {
+			if printLog {
+				appLogger.Printf("l.ByNamespace not found")
+			}
+
 			return obj
 		}
 	}
+
+	if printLog {
+		appLogger.Printf("nil")
+	}
+
 	return nil
 }
 
@@ -241,13 +266,13 @@ func main() {
 				if *ignoreNormal && obj.(*corev1.Event).Type == corev1.EventTypeNormal {
 					return
 				}
-				onEvent(obj.(*corev1.Event), loggerEvent, enr)
+				onEvent(obj.(*corev1.Event), loggerEvent, enr, loggerApplication)
 			},
 			UpdateFunc: func(oldObj, newObj interface{}) {
 				if *ignoreUpdate || (*ignoreNormal && newObj.(*corev1.Event).Type == corev1.EventTypeNormal) {
 					return
 				}
-				onEvent(newObj.(*corev1.Event), loggerEvent, enr)
+				onEvent(newObj.(*corev1.Event), loggerEvent, enr, loggerApplication)
 			},
 		},
 	)
@@ -258,12 +283,12 @@ func main() {
 	select {}
 }
 
-func onEvent(evt *corev1.Event, logger *log.Logger, enr *Enricher) {
+func onEvent(evt *corev1.Event, logger *log.Logger, enr *Enricher, appLogger *log.Logger) {
 	j, _ := json.Marshal(evt)
 	logger.Printf("%s\n", string(j))
 
 	if *metricsEnabled {
-		pid, eid, sid := enr.Labels(evt)
+		pid, eid, sid := enr.Labels(evt, appLogger)
 		incMetrics(evt, pid, eid, sid)
 	}
 }
