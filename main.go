@@ -113,7 +113,7 @@ func (e *Enricher) fetch(evt *corev1.Event, appLogger *log.Logger) runtime.Objec
 
 	l := e.getLister(guessGVR(evt))
 	if printLog {
-		appLogger.Printf("l is nil %s", l == nil)
+		appLogger.Printf("l is nil %t", l == nil)
 	}
 	if l == nil {
 		return nil
@@ -121,19 +121,23 @@ func (e *Enricher) fetch(evt *corev1.Event, appLogger *log.Logger) runtime.Objec
 
 	if obj, err := l.Get(evt.InvolvedObject.Name); err == nil {
 		if printLog {
-			appLogger.Printf("l.Get not found")
+			appLogger.Printf("l.Get found")
 		}
 		return obj
+	} else {
+		appLogger.Printf("l.Get not found %s", err)
 	}
 
 	if evt.Namespace != "" {
 		if obj, err := l.ByNamespace(evt.Namespace).
 			Get(evt.InvolvedObject.Name); err == nil {
 			if printLog {
-				appLogger.Printf("l.ByNamespace not found")
+				appLogger.Printf("l.ByNamespace  found")
 			}
 
 			return obj
+		} else {
+			appLogger.Printf("l.ByNamespace not found %s", err)
 		}
 	}
 
