@@ -48,6 +48,13 @@ var (
 		},
 		[]string{"type", "reason", "object_kind", "qovery.com/project-id", "qovery.com/environment-id", "qovery_com_service_id"},
 	)
+	eventsWithoutService = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "k8s_event_logger_debug_total",
+			Help: "Total number of Kubernetes events processed",
+		},
+		[]string{"type", "reason", "object_kind", "object_name", "namespace"},
+	)
 )
 
 /* -------------------------- Dynamic-informer cache ------------------------ */
@@ -183,6 +190,16 @@ func handleEvent(evt *corev1.Event, logger *log.Logger) {
 		envId,
 		serviceId,
 	).Inc()
+
+	if serviceId == "" {
+		eventsWithoutService.WithLabelValues(
+			evt.Type,
+			evt.Reason,
+			evt.InvolvedObject.Kind,
+			evt.InvolvedObject.Name,
+			evt.InvolvedObject.Namespace,
+		)
+	}
 }
 
 /* --------------------------- helper functions ----------------------------- */
