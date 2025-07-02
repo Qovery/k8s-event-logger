@@ -32,5 +32,3 @@ build-image:
   when: manual
   tags:
     - vm-250mcpu-1gmem-0g
-  only:
-    - master
