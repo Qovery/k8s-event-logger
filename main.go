@@ -49,7 +49,7 @@ var (
 	eventsHit = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "k8s_event_logger_q_cache_event_total",
-			Help: "",
+			Help: "Cache hit/miss events for object label fetching",
 		},
 		[]string{"cache_type"},
 	)
@@ -141,22 +141,27 @@ func logEvent(obj interface{}, logger *log.Logger) {
 }
 
 func recordMetric(evt *corev1.Event, fetcher *ObjectLabelFetcher) {
-	if *metricsEnabled {
-		qoveryProjectId := ""
-		qoveryEnvId := ""
-		qoveryServiceId := ""
-
-		labels, err := fetcher.LabelsForEvent(context.Background(), evt)
-		if err == nil {
-			qoveryProjectId = labels["qovery.com/project-id"]
-			qoveryEnvId = labels["qovery.com/environment-id"]
-			qoveryServiceId = labels["qovery.com/service-id"]
-		}
-
-		eventsTotal.
-			WithLabelValues(evt.Type, evt.Reason, evt.InvolvedObject.Kind, qoveryProjectId, qoveryEnvId, qoveryServiceId).
-			Inc()
+	if !*metricsEnabled {
+		return
 	}
+
+	qoveryProjectId := ""
+	qoveryEnvId := ""
+	qoveryServiceId := ""
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	labels, err := fetcher.LabelsForEvent(ctx, evt)
+	if err == nil {
+		qoveryProjectId = labels["qovery.com/project-id"]
+		qoveryEnvId = labels["qovery.com/environment-id"]
+		qoveryServiceId = labels["qovery.com/service-id"]
+	}
+
+	eventsTotal.
+		WithLabelValues(evt.Type, evt.Reason, evt.InvolvedObject.Kind, qoveryProjectId, qoveryEnvId, qoveryServiceId).
+		Inc()
 }
 
 type cacheKey string
@@ -234,7 +239,11 @@ func (f *ObjectLabelFetcher) LabelsForEvent(ctx context.Context, evt *corev1.Eve
 	// Pick the correct dynamic ResourceInterface (namespaced or cluster-wide).
 	var dr dynamic.ResourceInterface
 	if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
-		dr = f.dynClient.Resource(mapping.Resource).Namespace(evt.InvolvedObject.Namespace)
+		ns := evt.InvolvedObject.Namespace
+		if ns == "" {
+			ns = evt.Namespace
+		}
+		dr = f.dynClient.Resource(mapping.Resource).Namespace(ns)
 	} else {
 		dr = f.dynClient.Resource(mapping.Resource)
 	}
