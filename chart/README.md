@@ -1,50 +1,91 @@
 # k8s-event-logger
 
-This chart installs [github.com/max-rocket-internet/k8s-event-logger](https://github.com/max-rocket-internet/k8s-event-logger).
+![Version: 1.1.8](https://img.shields.io/badge/Version-1.1.8-informational?style=flat-square) ![AppVersion: 2.1](https://img.shields.io/badge/AppVersion-2.1-informational?style=flat-square)
 
-## Prerequisites
+This chart runs a pod that simply watches Kubernetes Events and logs them to stdout in JSON to be collected and stored by your logging solution, e.g. [fluentd](https://github.com/helm/charts/tree/master/stable/fluentd) or [fluent-bit](https://github.com/helm/charts/tree/master/stable/fluent-bit).
 
-- Kubernetes 1.23+
+https://github.com/max-rocket-internet/k8s-event-logger
 
-## Installing the Chart
+Events in Kubernetes log very important information. If are trying to understand what happened in the past then these events show clearly what your Kubernetes cluster was thinking and doing. Some examples:
 
-To install the chart with the release name `my-release` and default configuration:
+- Pod events like failed probes, crashes, scheduling related information like `TriggeredScaleUp` or `FailedScheduling`
+- HorizontalPodAutoscaler events like scaling up and down
+- Deployment events like scaling in and out of ReplicaSets
+- Ingress events like create and update
 
-```sh
-helm install my-release ./chart
+The problem is that these events are simply API objects in Kubernetes and are only stored for about 1 hour. Without some way of storing these events, debugging a problem in the past very tricky.
+
+**Homepage:** <https://github.com/max-rocket-internet/k8s-event-logger>
+
+## How to install this chart
+
+Add Delivery Hero public chart repo:
+
+```console
+helm repo add deliveryhero https://charts.deliveryhero.io/
 ```
 
-## Uninstalling the Chart
+A simple install with default values:
 
-To delete the chart:
-
-```sh
-helm delete my-release
+```console
+helm install deliveryhero/k8s-event-logger
 ```
 
-## Configuration
+To install the chart with the release name `my-release`:
 
-The following table lists the configurable parameters for this chart and their default values.
-
-| Parameter                | Description                          | Default                                                |
-| -------------------------|--------------------------------------|--------------------------------------------------------|
-| `resources`              | Resources for the overprovision pods | `{}`                                                   |
-| `image.repository`       | Image repository                     | `maxrocketinternet/k8s-event-logger`                   |
-| `image.tag`              | Image tag                            | `2.3`                                                  |
-| `image.pullPolicy`       | Container pull policy                | `IfNotPresent`                                         |
-| `affinity`               | Map of node/pod affinities           | `{}`                                                   |
-| `nodeSelector`           | Node labels for pod assignment       | `{}`                                                   |
-| `annotations`            | Optional deployment annotations      | `{}`                                                   |
-| `fullnameOverride`       | Override the fullname of the chart   | `nil`                                                  |
-| `nameOverride`           | Override the name of the chart       | `nil`                                                  |
-| `tolerations`            | Optional deployment tolerations      | `[]`                                                   |
-| `podLabels`              | Additional labels to use for pods    | `{}`                                                   |
-| `env.KUBERNETES_API_URL` | URL of the k8s API in your cluster   | `https://172.20.0.1:443`                               |
-| `env.CA_FILE`            | Path to the service account CA file  | `/var/run/secrets/kubernetes.io/serviceaccount/ca.crt` |
-| `podLabels`              | Additional labels to use for pods    | `{}`                                                   |
-
-Specify each parameter using the `--set key=value[,key=value]` argument to `helm install` or provide a YAML file containing the values for the above parameters:
-
-```sh
-helm install --name my-release stable/k8s-event-logger --values values.yaml
+```console
+helm install my-release deliveryhero/k8s-event-logger
 ```
+
+To install with some set values:
+
+```console
+helm install my-release deliveryhero/k8s-event-logger --set values_key1=value1 --set values_key2=value2
+```
+
+To install with custom values file:
+
+```console
+helm install my-release deliveryhero/k8s-event-logger -f values.yaml
+```
+
+## Source Code
+
+* <https://github.com/max-rocket-internet/k8s-event-logger>
+
+## Values
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| affinity | object | `{}` |  |
+| annotations | object | `{}` |  |
+| args | list | `[]` |  |
+| containerName | string | `"k8s-event-logger"` |  |
+| env | object | `{}` | A map of environment variables |
+| fullnameOverride | string | `""` |  |
+| image.pullPolicy | string | `"IfNotPresent"` |  |
+| image.repository | string | `"maxrocketinternet/k8s-event-logger"` |  |
+| imagePullSecrets | list | `[]` |  |
+| nameOverride | string | `""` |  |
+| nodeSelector | object | `{}` |  |
+| podAnnotations | object | `{}` |  |
+| podLabels | object | `{}` |  |
+| podSecurityContext.allowPrivilegeEscalation | bool | `false` |  |
+| podSecurityContext.capabilities.drop[0] | string | `"ALL"` |  |
+| podSecurityContext.readOnlyRootFilesystem | bool | `true` |  |
+| podSecurityContext.runAsGroup | int | `10001` |  |
+| podSecurityContext.runAsNonRoot | bool | `true` |  |
+| podSecurityContext.runAsUser | int | `10001` |  |
+| podSecurityContext.seccompProfile.type | string | `"RuntimeDefault"` |  |
+| resources.limits.cpu | string | `"100m"` |  |
+| resources.limits.memory | string | `"128Mi"` |  |
+| resources.requests.cpu | string | `"10m"` |  |
+| resources.requests.memory | string | `"128Mi"` |  |
+| securityContext | object | `{}` |  |
+| tolerations | list | `[]` |  |
+
+## Maintainers
+
+| Name | Email | Url |
+| ---- | ------ | --- |
+| max-rocket-internet | <max.williams@deliveryhero.com> |  |
