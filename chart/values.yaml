@@ -1,28 +1,25 @@
+containerName: k8s-event-logger
 image:
-  containerName: app
   repository: maxrocketinternet/k8s-event-logger
-  tag: "2.3"
+  # image.tag -- Overrides the image tag whose default is the chart appVersion.
+  # tag: "2.0"
   pullPolicy: IfNotPresent
 
 resources:
   requests:
     cpu: 10m
-    memory: 32Mi
+    memory: 128Mi
   limits:
     cpu: 100m
     memory: 128Mi
 
+# env -- A map of environment variables
 env: {}
 args: []
-imagePullSecrets: []
-nameOverride: ""
-fullnameOverride: ""
-nodeSelector: {}
-tolerations: []
-affinity: {}
-podLabels: {}
-podAnnotations: {}
-securityContext:
+
+securityContext: {}
+
+podSecurityContext:
   readOnlyRootFilesystem: true
   runAsNonRoot: true
   runAsUser: 10001
@@ -33,3 +30,36 @@ securityContext:
       - ALL
   seccompProfile:
     type: RuntimeDefault
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podLabels: {}
+annotations: {}
+podAnnotations: {}
+
+service:
+  enabled: false
+  type: ClusterIP
+  port: 8080
+  targetPort: 8080
+
+metrics:
+  enabled: false
+  port: 8080
+
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+  metricRelabelings: []
+
+clusterRole:
+  rules:
+    - apiGroups: [ "" ]
+      resources: [ "events" ]
+      verbs: [ "get", "list", "watch" ]
